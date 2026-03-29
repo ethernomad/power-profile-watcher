@@ -132,8 +132,8 @@ This checks that:
 - `~/.config/systemd/user/power-profile-watcher.service` exists
 - the `ExecStart` binary referenced by the installed service exists
 - the service is enabled and active in the user systemd manager
-- `UPower` is reachable over D-Bus
-- `power-profiles-daemon` is reachable over D-Bus
+
+Normal daemon startup separately verifies that `UPower` and `power-profiles-daemon` are reachable over D-Bus before it begins watching for power-source changes.
 
 Watch service logs:
 

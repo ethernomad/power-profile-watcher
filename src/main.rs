@@ -166,10 +166,6 @@ async fn verify_service() -> Result<(), Box<dyn Error>> {
     run_systemctl_user_expect_output(["is-enabled", SERVICE_NAME], "enabled", "enabled").await?;
     run_systemctl_user_expect_output(["is-active", SERVICE_NAME], "active", "running").await?;
 
-    let connection = Connection::system().await?;
-    verify_upower_available(&connection).await?;
-    verify_power_profiles_available(&connection).await?;
-
     info!(
         service_path = %service_path.display(),
         executable = %executable.display(),
@@ -181,6 +177,9 @@ async fn verify_service() -> Result<(), Box<dyn Error>> {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let connection = Connection::system().await?;
+
+    verify_upower_available(&connection).await?;
+    verify_power_profiles_available(&connection).await?;
 
     apply_profile_for_current_power_source(&connection).await?;
 
