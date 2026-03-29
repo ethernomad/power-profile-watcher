@@ -42,49 +42,51 @@ target/release/power-profile-watcher
 
 ## Install Binary
 
-Install the binary into your local user bin directory:
+Build the binary in this repository:
 
 ```bash
-mkdir -p ~/.local/bin
-install -m 0755 target/release/power-profile-watcher ~/.local/bin/power-profile-watcher
+cargo build --release
 ```
 
-Make sure `~/.local/bin` is in your `PATH`.
+Or install it into your Cargo bin directory:
+
+```bash
+cargo install --path .
+```
+
+The service installer command uses the path of the currently running executable, so it works both when you run the binary from `target/release/` and when you run the `cargo install` copy from `~/.cargo/bin/`.
 
 ## Run Manually
 
 You can test it directly before creating a service:
 
 ```bash
-~/.local/bin/power-profile-watcher
+target/release/power-profile-watcher
 ```
 
 You should see log lines when it starts and when it changes profiles.
 
 Stop it with `Ctrl+C`.
 
+If you installed it with `cargo install --path .`, run `power-profile-watcher` instead.
+
 ## Install As A systemd User Service
 
-Create the user service directory if needed:
+Use the built-in installer command:
 
 ```bash
-mkdir -p ~/.config/systemd/user
+target/release/power-profile-watcher install-service
 ```
 
-Install the included service file:
+If you installed it with `cargo install --path .`, run:
 
 ```bash
-install -m 0644 power-profile-watcher.service ~/.config/systemd/user/power-profile-watcher.service
+power-profile-watcher install-service
 ```
 
-The included service file already sets `Environment=RUST_LOG=info`, so it emits normal log output by default.
+This writes `~/.config/systemd/user/power-profile-watcher.service`, reloads the user manager, and runs `systemctl --user enable --now power-profile-watcher.service`.
 
-Reload the user manager and enable the service:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now power-profile-watcher.service
-```
+The generated unit sets `Environment=RUST_LOG=info`, so it emits normal log output by default.
 
 ## Verify
 
@@ -118,20 +120,24 @@ After modifying the program:
 
 ```bash
 cargo build --release
-install -m 0755 target/release/power-profile-watcher ~/.local/bin/power-profile-watcher
-systemctl --user restart power-profile-watcher.service
+target/release/power-profile-watcher install-service
 ```
 
 ## Uninstall
 
-Disable the service and remove installed files:
+Remove the user service with the built-in command:
 
 ```bash
-systemctl --user disable --now power-profile-watcher.service
-rm -f ~/.config/systemd/user/power-profile-watcher.service
-rm -f ~/.local/bin/power-profile-watcher
-systemctl --user daemon-reload
+target/release/power-profile-watcher uninstall-service
 ```
+
+If you installed it with `cargo install --path .`, run:
+
+```bash
+power-profile-watcher uninstall-service
+```
+
+This disables the service, removes `~/.config/systemd/user/power-profile-watcher.service`, and reloads the user manager.
 
 ## Notes
 

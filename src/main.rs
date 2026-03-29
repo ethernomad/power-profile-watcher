@@ -1,8 +1,11 @@
 use std::error::Error;
+use std::fmt::Write as _;
+use std::path::PathBuf;
 
-use clap::{ColorChoice, Parser};
+use clap::{ColorChoice, Parser, Subcommand};
 use futures_util::StreamExt;
 use tokio::signal;
+use tokio::process::Command;
 use zbus::fdo::PropertiesProxy;
 use zbus::Connection;
 use zbus::names::InterfaceName;
@@ -18,6 +21,7 @@ const UPOWER_PATH: &str = "/org/freedesktop/UPower";
 const UPOWER_INTERFACE: &str = "org.freedesktop.UPower";
 const PROFILE_PERFORMANCE: &str = "performance";
 const PROFILE_POWERSAVE: &str = "power-saver";
+const SERVICE_NAME: &str = "power-profile-watcher.service";
 
 fn clap_styles() -> clap::builder::Styles {
     use clap::builder::styling::{AnsiColor, Effects, Styles};
@@ -35,12 +39,26 @@ fn clap_styles() -> clap::builder::Styles {
     version,
     about,
     long_about = None,
+    help_template = "{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}",
+    disable_help_subcommand = true,
     color = ColorChoice::Always,
     styles = clap_styles()
 )]
 struct Cli {
     #[command(flatten)]
     verbosity: Verbosity<InfoLevel>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Install and enable the systemd user service
+    InstallService,
+
+    /// Disable and remove the systemd user service
+    UninstallService,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,10 +84,55 @@ async fn main() {
         .with_target(false)
         .init();
 
-    if let Err(err) = run().await {
+    let result = match cli.command {
+        Some(Commands::InstallService) => install_service().await,
+        Some(Commands::UninstallService) => uninstall_service().await,
+        None => run().await,
+    };
+
+    if let Err(err) = result {
         error!(%err, "daemon failed");
         std::process::exit(1);
     }
+}
+
+async fn install_service() -> Result<(), Box<dyn Error>> {
+    let executable = std::env::current_exe()?;
+    let service_dir = service_dir()?;
+    let service_path = service_dir.join(SERVICE_NAME);
+
+    tokio::fs::create_dir_all(&service_dir).await?;
+    tokio::fs::write(&service_path, render_service_unit(&executable)).await?;
+
+    run_systemctl_user(["daemon-reload"]).await?;
+    run_systemctl_user(["enable", "--now", SERVICE_NAME]).await?;
+
+    info!(service_path = %service_path.display(), executable = %executable.display(), "installed systemd user service");
+
+    Ok(())
+}
+
+async fn uninstall_service() -> Result<(), Box<dyn Error>> {
+    let service_path = service_dir()?.join(SERVICE_NAME);
+
+    let disable_result = run_systemctl_user(["disable", "--now", SERVICE_NAME]).await;
+    if let Err(err) = disable_result {
+        if service_path.exists() {
+            return Err(err);
+        }
+    }
+
+    match tokio::fs::remove_file(&service_path).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    run_systemctl_user(["daemon-reload"]).await?;
+
+    info!(service_path = %service_path.display(), "uninstalled systemd user service");
+
+    Ok(())
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
@@ -130,6 +193,50 @@ fn resolve_filter(verbosity: &Verbosity<InfoLevel>) -> tracing_subscriber::EnvFi
         };
         tracing_subscriber::EnvFilter::new(level)
     }
+}
+
+fn service_dir() -> Result<PathBuf, Box<dyn Error>> {
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".config/systemd/user"))
+}
+
+fn render_service_unit(executable: &std::path::Path) -> String {
+    let escaped_executable = escape_systemd_exec_argument(executable);
+    let mut unit = String::new();
+    let _ = write!(
+        unit,
+        "[Unit]\nDescription=Watch power source and switch power profiles\nAfter=graphical-session.target\nWants=graphical-session.target\n\n[Service]\nType=simple\nExecStart={}\nEnvironment=RUST_LOG=info\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        escaped_executable
+    );
+    unit
+}
+
+fn escape_systemd_exec_argument(path: &std::path::Path) -> String {
+    path.display().to_string().replace(' ', "\\x20")
+}
+
+async fn run_systemctl_user<const N: usize>(args: [&str; N]) -> Result<(), Box<dyn Error>> {
+    let output = Command::new("systemctl")
+        .args(["--user"])
+        .args(args)
+        .output()
+        .await?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("systemctl exited with status {}", output.status)
+    };
+
+    Err(format!("systemctl --user {} failed: {}", args.join(" "), details).into())
 }
 
 async fn apply_profile_for_current_power_source(connection: &Connection) -> Result<(), Box<dyn Error>> {
@@ -355,6 +462,7 @@ mod tests {
         unsafe { std::env::remove_var("RUST_LOG") };
         let cli = Cli {
             verbosity: Verbosity::new(0, 0),
+            command: None,
         };
 
         let filter = resolve_filter(&cli.verbosity);
@@ -366,11 +474,50 @@ mod tests {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
         let cli = Cli {
             verbosity: Verbosity::new(2, 0),
+            command: None,
         };
 
         let filter = resolve_filter(&cli.verbosity);
         unsafe { std::env::remove_var("RUST_LOG") };
 
         assert_eq!(filter.to_string(), "debug");
+    }
+
+    #[test]
+    fn install_service_subcommand_parses() {
+        let cli = Cli::parse_from(["power-profile-watcher", "install-service"]);
+        assert!(matches!(cli.command, Some(Commands::InstallService)));
+    }
+
+    #[test]
+    fn uninstall_service_subcommand_parses() {
+        let cli = Cli::parse_from(["power-profile-watcher", "uninstall-service"]);
+        assert!(matches!(cli.command, Some(Commands::UninstallService)));
+    }
+
+    #[test]
+    fn service_dir_is_under_home_config_systemd_user() {
+        let original_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/tmp/power-profile-watcher-home") };
+
+        let dir = service_dir().expect("service dir should resolve");
+
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert_eq!(dir, PathBuf::from("/tmp/power-profile-watcher-home/.config/systemd/user"));
+    }
+
+    #[test]
+    fn rendered_service_uses_resolved_executable_path() {
+        let unit = render_service_unit(std::path::Path::new(
+            "/tmp/build output/power-profile-watcher",
+        ));
+
+        assert!(unit.contains("ExecStart=/tmp/build\\x20output/power-profile-watcher"));
+        assert!(unit.contains("Environment=RUST_LOG=info"));
+        assert!(unit.contains("WantedBy=default.target"));
     }
 }
