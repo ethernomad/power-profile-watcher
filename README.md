@@ -191,6 +191,5 @@ For a new release:
 5. Run `cargo publish --dry-run`.
 6. Run `cargo publish`.
 7. After the new version appears on crates.io, create and push a matching git tag such as `v0.1.1`.
-8. Create the GitHub release from that tag.
 
-Publish to crates.io before creating the GitHub release. `cargo publish` is the irreversible step, while a GitHub release can be edited or recreated if needed.
+Publish to crates.io before creating and pushing the release tag. `cargo publish` is the irreversible step.
