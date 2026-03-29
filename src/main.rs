@@ -61,10 +61,10 @@ enum Commands {
     /// Install and enable the systemd user service
     InstallService,
 
-    /// Verify the installed systemd user service and dependencies
+    /// Verify the installed systemd user service
     VerifyService,
 
-    /// Disable and remove the systemd user service
+    /// Disable and uninstall the systemd user service
     UninstallService,
 }
 
@@ -165,6 +165,9 @@ async fn verify_service() -> Result<(), Box<dyn Error>> {
         )
     })?;
     let executable = PathBuf::from(unescape_systemd_exec_argument(exec_start));
+    let expected_executable = std::env::current_exe()?;
+
+    verify_service_executable(&executable, &expected_executable)?;
 
     if !executable.exists() {
         return Err(format!("service binary not found: {}", executable.display()).into());
@@ -281,6 +284,22 @@ fn escape_systemd_exec_argument(path: &std::path::Path) -> String {
 
 fn unescape_systemd_exec_argument(value: &str) -> String {
     value.replace("\\x20", " ")
+}
+
+fn verify_service_executable(
+    executable: &std::path::Path,
+    expected_executable: &std::path::Path,
+) -> Result<(), Box<dyn Error>> {
+    if executable == expected_executable {
+        return Ok(());
+    }
+
+    Err(format!(
+        "service executable is incorrect: expected {}, found {}",
+        expected_executable.display(),
+        executable.display()
+    )
+    .into())
 }
 
 async fn run_systemctl_user<const N: usize>(args: [&str; N]) -> Result<(), Box<dyn Error>> {
@@ -508,6 +527,7 @@ impl PowerSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn clap_styles_build_without_panicking() {
@@ -685,6 +705,34 @@ mod tests {
     }
 
     #[test]
+    fn verify_service_subcommand_has_updated_help_text() {
+        let command = Cli::command();
+        let verify_service = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "verify-service")
+            .expect("verify-service subcommand should exist");
+
+        assert_eq!(
+            verify_service.get_about().map(ToString::to_string),
+            Some("Verify the installed systemd user service".to_string())
+        );
+    }
+
+    #[test]
+    fn uninstall_service_subcommand_has_updated_help_text() {
+        let command = Cli::command();
+        let uninstall_service = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "uninstall-service")
+            .expect("uninstall-service subcommand should exist");
+
+        assert_eq!(
+            uninstall_service.get_about().map(ToString::to_string),
+            Some("Disable and uninstall the systemd user service".to_string())
+        );
+    }
+
+    #[test]
     fn service_dir_is_under_home_config_systemd_user() {
         let original_home = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", "/tmp/power-profile-watcher-home") };
@@ -748,6 +796,26 @@ mod tests {
         assert_eq!(
             PathBuf::from(unescape_systemd_exec_argument(exec_start)),
             PathBuf::from("/tmp/build output/power-profile-watcher")
+        );
+    }
+
+    #[test]
+    fn verify_service_executable_accepts_expected_path() {
+        let executable = std::path::Path::new("/tmp/power-profile-watcher");
+
+        assert!(verify_service_executable(executable, executable).is_ok());
+    }
+
+    #[test]
+    fn verify_service_executable_rejects_wrong_existing_path() {
+        let result = verify_service_executable(
+            std::path::Path::new("/usr/bin/power-profile-watcher"),
+            std::path::Path::new("/home/jbrown/.cargo/bin/power-profile-watcher"),
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "service executable is incorrect: expected /home/jbrown/.cargo/bin/power-profile-watcher, found /usr/bin/power-profile-watcher"
         );
     }
 
