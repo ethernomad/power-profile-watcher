@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "power-profile-watcher"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "clap",
  "futures-util",
