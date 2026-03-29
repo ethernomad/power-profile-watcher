@@ -484,7 +484,7 @@ async fn set_active_profile(connection: &Connection, profile: &str) -> Result<()
         .set(
             InterfaceName::try_from(POWER_PROFILES_INTERFACE)?,
             "ActiveProfile",
-            &value,
+            value,
         )
         .await?;
     Ok(())
