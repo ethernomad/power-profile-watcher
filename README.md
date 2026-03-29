@@ -59,7 +59,7 @@ You can test it directly before creating a service:
 ~/.local/bin/power-profile-watcher
 ```
 
-You should see log lines when it starts and when it changes profiles. Set `RUST_LOG=info` for normal output.
+You should see log lines when it starts and when it changes profiles.
 
 Stop it with `Ctrl+C`.
 
@@ -77,7 +77,7 @@ Install the included service file:
 install -m 0644 power-profile-watcher.service ~/.config/systemd/user/power-profile-watcher.service
 ```
 
-If you want the service to always emit logs, add `Environment=RUST_LOG=info` to the unit file.
+The included service file already sets `Environment=RUST_LOG=info`, so it emits normal log output by default.
 
 Reload the user manager and enable the service:
 
