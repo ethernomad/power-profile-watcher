@@ -2,6 +2,12 @@
 name = "power-profile-watcher"
 version = "0.1.0"
 edition = "2024"
+description = "Watches UPower power-source changes and updates power-profiles-daemon automatically"
+license = "MIT"
+repository = "https://github.com/ethernomad/power-profile-watcher"
+readme = "README.md"
+keywords = ["linux", "dbus", "power", "daemon", "upower"]
+categories = ["command-line-utilities", "os::linux-apis"]
 
 [dependencies]
 futures-util = "0.3.32"
