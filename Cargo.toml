@@ -1,6 +1,6 @@
 [package]
 name = "power-profile-watcher"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "Watches UPower power-source changes and updates power-profiles-daemon automatically"
 license = "MIT"
