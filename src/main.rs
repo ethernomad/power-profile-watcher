@@ -7,6 +7,8 @@ use zbus::fdo::PropertiesProxy;
 use zbus::Connection;
 use zbus::names::InterfaceName;
 use zvariant::Value;
+use clap_verbosity_flag::{InfoLevel, Verbosity};
+use tracing::{error, info};
 
 const POWER_PROFILES_DESTINATION: &str = "net.hadess.PowerProfiles";
 const POWER_PROFILES_PATH: &str = "/net/hadess/PowerProfiles";
@@ -36,7 +38,10 @@ fn clap_styles() -> clap::builder::Styles {
     color = ColorChoice::Always,
     styles = clap_styles()
 )]
-struct Cli;
+struct Cli {
+    #[command(flatten)]
+    verbosity: Verbosity<InfoLevel>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PowerSource {
@@ -52,10 +57,17 @@ enum ProfileDecision {
 
 #[tokio::main]
 async fn main() {
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+
+    let filter = resolve_filter(&cli.verbosity);
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
 
     if let Err(err) = run().await {
-        eprintln!("Error: {err}");
+        error!(%err, "daemon failed");
         std::process::exit(1);
     }
 }
@@ -73,7 +85,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .await?;
     let mut changes = properties_proxy.receive_properties_changed().await?;
 
-    println!("Watching UPower for power-source changes");
+    info!("watching UPower for power-source changes");
 
     loop {
         tokio::select! {
@@ -99,7 +111,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
             ctrl_c = signal::ctrl_c() => {
                 ctrl_c?;
-                println!("Received shutdown signal");
+                info!("received shutdown signal");
                 break;
             }
         }
@@ -108,21 +120,35 @@ async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn resolve_filter(verbosity: &Verbosity<InfoLevel>) -> tracing_subscriber::EnvFilter {
+    if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::EnvFilter::from_default_env()
+    } else {
+        let level = match verbosity.log_level() {
+            Some(level) => level.to_string(),
+            None => "info".to_string(),
+        };
+        tracing_subscriber::EnvFilter::new(level)
+    }
+}
+
 async fn apply_profile_for_current_power_source(connection: &Connection) -> Result<(), Box<dyn Error>> {
     let power_source = current_power_source(connection).await?;
     let current_profile = active_profile(connection).await?;
     match decide_profile_action(power_source, &current_profile) {
         ProfileDecision::Unchanged { desired_profile } => {
-            println!(
-                "Power source unchanged for profile selection: source={}, profile={desired_profile}",
-                power_source.label()
+            info!(
+                source = power_source.label(),
+                profile = desired_profile,
+                "power source unchanged for profile selection"
             );
         }
         ProfileDecision::Change { desired_profile } => {
             set_active_profile(connection, desired_profile).await?;
-            println!(
-                "Set active profile to {desired_profile} (source={})",
-                power_source.label()
+            info!(
+                source = power_source.label(),
+                profile = desired_profile,
+                "set active profile"
             );
         }
     }
@@ -322,5 +348,29 @@ mod tests {
     fn power_source_labels_are_stable_for_logging() {
         assert_eq!(PowerSource::Ac.label(), "ac");
         assert_eq!(PowerSource::Battery.label(), "battery");
+    }
+
+    #[test]
+    fn defaults_to_info_when_no_rust_log_and_no_verbosity_flags() {
+        unsafe { std::env::remove_var("RUST_LOG") };
+        let cli = Cli {
+            verbosity: Verbosity::new(0, 0),
+        };
+
+        let filter = resolve_filter(&cli.verbosity);
+        assert_eq!(filter.to_string(), "info");
+    }
+
+    #[test]
+    fn uses_rust_log_when_present() {
+        unsafe { std::env::set_var("RUST_LOG", "debug") };
+        let cli = Cli {
+            verbosity: Verbosity::new(2, 0),
+        };
+
+        let filter = resolve_filter(&cli.verbosity);
+        unsafe { std::env::remove_var("RUST_LOG") };
+
+        assert_eq!(filter.to_string(), "debug");
     }
 }
