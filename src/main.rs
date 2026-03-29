@@ -9,7 +9,7 @@ use tokio::process::Command;
 use zbus::fdo::PropertiesProxy;
 use zbus::Connection;
 use zbus::names::InterfaceName;
-use zvariant::Value;
+use zbus::zvariant::Value;
 use tracing::{error, info};
 
 const POWER_PROFILES_DESTINATION: &str = "net.hadess.PowerProfiles";
