@@ -109,13 +109,20 @@ async fn install_service() -> Result<(), Box<dyn Error>> {
     let service_dir = service_dir()?;
     let service_path = service_dir.join(SERVICE_NAME);
 
+    if is_systemctl_user_active(SERVICE_NAME).await? {
+        run_systemctl_user(["stop", SERVICE_NAME]).await?;
+        info!(service = SERVICE_NAME, "stopped active systemd user service");
+    }
+
     tokio::fs::create_dir_all(&service_dir).await?;
     tokio::fs::write(&service_path, render_service_unit(&executable)).await?;
+    info!(service_path = %service_path.display(), executable = %executable.display(), "wrote systemd user service unit");
 
     run_systemctl_user(["daemon-reload"]).await?;
-    run_systemctl_user(["enable", "--now", SERVICE_NAME]).await?;
+    info!("reloaded systemd user manager");
 
-    info!(service_path = %service_path.display(), executable = %executable.display(), "installed systemd user service");
+    run_systemctl_user(["enable", "--now", SERVICE_NAME]).await?;
+    info!(service = SERVICE_NAME, "enabled and started systemd user service");
 
     Ok(())
 }
@@ -298,6 +305,37 @@ async fn run_systemctl_user<const N: usize>(args: [&str; N]) -> Result<(), Box<d
     };
 
     Err(format!("systemctl --user {} failed: {}", args.join(" "), details).into())
+}
+
+async fn is_systemctl_user_active(unit: &str) -> Result<bool, Box<dyn Error>> {
+    let output = Command::new("systemctl")
+        .args(["--user", "is-active", unit])
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Some(is_active) = parse_systemctl_is_active(&stdout) {
+        return Ok(is_active);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let details = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("systemctl exited with status {}", output.status)
+    };
+
+    Err(format!("systemctl --user is-active {unit} failed: {details}").into())
+}
+
+fn parse_systemctl_is_active(stdout: &str) -> Option<bool> {
+    match stdout {
+        "active" => Some(true),
+        "inactive" | "failed" | "activating" | "deactivating" | "unknown" => Some(false),
+        _ => None,
+    }
 }
 
 async fn run_systemctl_user_expect_output<const N: usize>(
@@ -711,5 +749,22 @@ mod tests {
             PathBuf::from(unescape_systemd_exec_argument(exec_start)),
             PathBuf::from("/tmp/build output/power-profile-watcher")
         );
+    }
+
+    #[test]
+    fn parses_active_systemctl_state() {
+        assert_eq!(parse_systemctl_is_active("active"), Some(true));
+    }
+
+    #[test]
+    fn parses_inactive_systemctl_states() {
+        for state in ["inactive", "failed", "activating", "deactivating", "unknown"] {
+            assert_eq!(parse_systemctl_is_active(state), Some(false));
+        }
+    }
+
+    #[test]
+    fn returns_none_for_unexpected_systemctl_state() {
+        assert_eq!(parse_systemctl_is_active("reloading"), None);
     }
 }

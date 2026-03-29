@@ -109,7 +109,7 @@ If you installed it with `cargo install --path .`, run:
 power-profile-watcher install-service
 ```
 
-This writes `~/.config/systemd/user/power-profile-watcher.service`, reloads the user manager, and runs `systemctl --user enable --now power-profile-watcher.service`.
+This stops `power-profile-watcher.service` first if it is active, writes `~/.config/systemd/user/power-profile-watcher.service`, reloads the user manager, and runs `systemctl --user enable --now power-profile-watcher.service`.
 
 The generated unit sets `Environment=RUST_LOG=info`, so it emits normal log output by default.
 
@@ -156,7 +156,7 @@ cargo build --release
 target/release/power-profile-watcher install-service
 ```
 
-Running `install-service` multiple times is safe. It rewrites the unit file, reloads the user systemd manager, and runs `systemctl --user enable --now power-profile-watcher.service` again. If you run it from a different binary path, it updates `ExecStart` to point at that binary.
+Running `install-service` multiple times is safe. If the service is active, it stops it first, rewrites the unit file, reloads the user systemd manager, and runs `systemctl --user enable --now power-profile-watcher.service` again so the updated binary starts immediately. If you run it from a different binary path, it updates `ExecStart` to point at that binary.
 
 ## Uninstall
 
