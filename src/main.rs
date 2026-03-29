@@ -40,7 +40,7 @@ fn clap_styles() -> clap::builder::Styles {
     long_about = "Watches UPower power-source changes and updates power-profiles-daemon automatically.\n\nWatch service logs with:\n  journalctl --user -u power-profile-watcher.service -f",
     help_template = "{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}",
     disable_help_subcommand = true,
-    color = ColorChoice::Always,
+    color = ColorChoice::Auto,
     styles = clap_styles()
 )]
 struct Cli {
