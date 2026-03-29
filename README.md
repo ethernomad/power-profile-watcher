@@ -54,6 +54,12 @@ Or install it into your Cargo bin directory:
 cargo install --path .
 ```
 
+Or install the published crate from crates.io:
+
+```bash
+cargo install power-profile-watcher
+```
+
 The service installer command uses the path of the currently running executable, so it works both when you run the binary from `target/release/` and when you run the `cargo install` copy from `~/.cargo/bin/`.
 
 ## Run Manually
@@ -69,6 +75,25 @@ You should see log lines when it starts and when it changes profiles.
 Stop it with `Ctrl+C`.
 
 If you installed it with `cargo install --path .`, run `power-profile-watcher` instead.
+
+## Logging
+
+The daemon logs at `info` by default.
+
+You can adjust verbosity from the CLI:
+
+```bash
+power-profile-watcher -v
+power-profile-watcher -vv
+power-profile-watcher -q
+```
+
+- `-v` enables `debug`
+- `-vv` enables `trace`
+- `-q` reduces logging to `warn`
+- `-qq` reduces logging to `error`
+
+If `RUST_LOG` is set, it takes precedence over the CLI verbosity flags.
 
 ## Install As A systemd User Service
 
@@ -123,6 +148,8 @@ cargo build --release
 target/release/power-profile-watcher install-service
 ```
 
+Running `install-service` multiple times is safe. It rewrites the unit file, reloads the user systemd manager, and runs `systemctl --user enable --now power-profile-watcher.service` again. If you run it from a different binary path, it updates `ExecStart` to point at that binary.
+
 ## Uninstall
 
 Remove the user service with the built-in command:
@@ -144,3 +171,18 @@ This disables the service, removes `~/.config/systemd/user/power-profile-watcher
 - This program is not GNOME-specific. It works anywhere `UPower` and `power-profiles-daemon` are available.
 - It uses direct D-Bus calls instead of spawning `powerprofilesctl`.
 - It is event-driven. It does not poll.
+
+## Release Process
+
+For a new release:
+
+1. Update the version in `Cargo.toml`.
+2. Run `cargo test`.
+3. Run `cargo build --release`.
+4. Run `cargo package`.
+5. Run `cargo publish --dry-run`.
+6. Run `cargo publish`.
+7. After the new version appears on crates.io, create and push a matching git tag such as `v0.1.1`.
+8. Create the GitHub release from that tag.
+
+Publish to crates.io before creating the GitHub release. `cargo publish` is the irreversible step, while a GitHub release can be edited or recreated if needed.
