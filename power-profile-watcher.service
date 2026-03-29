@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch power source and switch power profiles
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/power-profile-watcher
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
