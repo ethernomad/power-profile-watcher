@@ -10,7 +10,6 @@ use zbus::fdo::PropertiesProxy;
 use zbus::Connection;
 use zbus::names::InterfaceName;
 use zvariant::Value;
-use clap_verbosity_flag::{InfoLevel, Verbosity};
 use tracing::{error, info};
 
 const POWER_PROFILES_DESTINATION: &str = "net.hadess.PowerProfiles";
@@ -45,8 +44,13 @@ fn clap_styles() -> clap::builder::Styles {
     styles = clap_styles()
 )]
 struct Cli {
-    #[command(flatten)]
-    verbosity: Verbosity<InfoLevel>,
+    /// Increase log verbosity (-v, -vv)
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    /// Reduce log verbosity (-q, -qq)
+    #[arg(short = 'q', long = "quiet", action = clap::ArgAction::Count, global = true)]
+    quiet: u8,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -77,7 +81,7 @@ enum ProfileDecision {
 async fn main() {
     let cli = Cli::parse();
 
-    let filter = resolve_filter(&cli.verbosity);
+    let filter = resolve_filter(&cli);
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -183,15 +187,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn resolve_filter(verbosity: &Verbosity<InfoLevel>) -> tracing_subscriber::EnvFilter {
+fn resolve_filter(cli: &Cli) -> tracing_subscriber::EnvFilter {
     if std::env::var_os("RUST_LOG").is_some() {
         tracing_subscriber::EnvFilter::from_default_env()
     } else {
-        let level = match verbosity.log_level() {
-            Some(level) => level.to_string(),
-            None => "info".to_string(),
-        };
+        let level = verbosity_level(cli.verbose, cli.quiet).to_string();
         tracing_subscriber::EnvFilter::new(level)
+    }
+}
+
+fn verbosity_level(verbose: u8, quiet: u8) -> &'static str {
+    let delta = verbose as i16 - quiet as i16;
+    match delta {
+        i16::MIN..=-2 => "error",
+        -1 => "warn",
+        0 => "info",
+        1 => "debug",
+        2..=i16::MAX => "trace",
     }
 }
 
@@ -461,11 +473,12 @@ mod tests {
     fn defaults_to_info_when_no_rust_log_and_no_verbosity_flags() {
         unsafe { std::env::remove_var("RUST_LOG") };
         let cli = Cli {
-            verbosity: Verbosity::new(0, 0),
+            verbose: 0,
+            quiet: 0,
             command: None,
         };
 
-        let filter = resolve_filter(&cli.verbosity);
+        let filter = resolve_filter(&cli);
         assert_eq!(filter.to_string(), "info");
     }
 
@@ -473,14 +486,41 @@ mod tests {
     fn uses_rust_log_when_present() {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
         let cli = Cli {
-            verbosity: Verbosity::new(2, 0),
+            verbose: 2,
+            quiet: 0,
             command: None,
         };
 
-        let filter = resolve_filter(&cli.verbosity);
+        let filter = resolve_filter(&cli);
         unsafe { std::env::remove_var("RUST_LOG") };
 
         assert_eq!(filter.to_string(), "debug");
+    }
+
+    #[test]
+    fn quiet_flag_reduces_default_info_to_warn() {
+        unsafe { std::env::remove_var("RUST_LOG") };
+        let cli = Cli {
+            verbose: 0,
+            quiet: 1,
+            command: None,
+        };
+
+        let filter = resolve_filter(&cli);
+        assert_eq!(filter.to_string(), "warn");
+    }
+
+    #[test]
+    fn double_verbose_increases_default_info_to_trace() {
+        unsafe { std::env::remove_var("RUST_LOG") };
+        let cli = Cli {
+            verbose: 2,
+            quiet: 0,
+            command: None,
+        };
+
+        let filter = resolve_filter(&cli);
+        assert_eq!(filter.to_string(), "trace");
     }
 
     #[test]
