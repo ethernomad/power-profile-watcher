@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use clap::{ColorChoice, Parser};
 use futures_util::StreamExt;
 use tokio::signal;
 use zbus::fdo::PropertiesProxy;
@@ -16,6 +17,27 @@ const UPOWER_INTERFACE: &str = "org.freedesktop.UPower";
 const PROFILE_PERFORMANCE: &str = "performance";
 const PROFILE_POWERSAVE: &str = "power-saver";
 
+fn clap_styles() -> clap::builder::Styles {
+    use clap::builder::styling::{AnsiColor, Effects, Styles};
+
+    Styles::styled()
+        .header(AnsiColor::Green.on_default() | Effects::BOLD)
+        .usage(AnsiColor::Green.on_default() | Effects::BOLD)
+        .literal(AnsiColor::Cyan.on_default() | Effects::BOLD)
+        .placeholder(AnsiColor::Cyan.on_default())
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    author,
+    version,
+    about,
+    long_about = None,
+    color = ColorChoice::Always,
+    styles = clap_styles()
+)]
+struct Cli;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PowerSource {
     Ac,
@@ -29,7 +51,17 @@ enum ProfileDecision {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
+    let _cli = Cli::parse();
+
+    if let Err(err) = run().await {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
+    
     let connection = Connection::system().await?;
 
     apply_profile_for_current_power_source(&connection).await?;
@@ -188,6 +220,11 @@ impl PowerSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clap_styles_build_without_panicking() {
+        let _ = clap_styles();
+    }
 
     #[test]
     fn maps_ac_to_performance_profile() {
