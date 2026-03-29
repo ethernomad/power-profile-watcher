@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use clap::{ColorChoice, Parser, Subcommand};
 use futures_util::StreamExt;
-use tokio::signal;
 use tokio::process::Command;
-use zbus::fdo::PropertiesProxy;
+use tokio::signal;
+use tracing::{error, info};
 use zbus::Connection;
+use zbus::fdo::PropertiesProxy;
 use zbus::names::InterfaceName;
 use zbus::zvariant::Value;
-use tracing::{error, info};
 
 const POWER_PROFILES_DESTINATION: &str = "net.hadess.PowerProfiles";
 const POWER_PROFILES_PATH: &str = "/net/hadess/PowerProfiles";
@@ -61,6 +61,9 @@ enum Commands {
     /// Install and enable the systemd user service
     InstallService,
 
+    /// Verify the installed systemd user service and dependencies
+    VerifyService,
+
     /// Disable and remove the systemd user service
     UninstallService,
 }
@@ -90,6 +93,7 @@ async fn main() {
 
     let result = match cli.command {
         Some(Commands::InstallService) => install_service().await,
+        Some(Commands::VerifyService) => verify_service().await,
         Some(Commands::UninstallService) => uninstall_service().await,
         None => run().await,
     };
@@ -139,8 +143,43 @@ async fn uninstall_service() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn verify_service() -> Result<(), Box<dyn Error>> {
+    let service_path = service_dir()?.join(SERVICE_NAME);
+
+    if !service_path.exists() {
+        return Err(format!("service file not found: {}", service_path.display()).into());
+    }
+
+    let unit = tokio::fs::read_to_string(&service_path).await?;
+    let exec_start = parse_exec_start(&unit).ok_or_else(|| {
+        format!(
+            "service file {} is missing ExecStart",
+            service_path.display()
+        )
+    })?;
+    let executable = PathBuf::from(unescape_systemd_exec_argument(exec_start));
+
+    if !executable.exists() {
+        return Err(format!("service binary not found: {}", executable.display()).into());
+    }
+
+    run_systemctl_user_expect_output(["is-enabled", SERVICE_NAME], "enabled", "enabled").await?;
+    run_systemctl_user_expect_output(["is-active", SERVICE_NAME], "active", "running").await?;
+
+    let connection = Connection::system().await?;
+    verify_upower_available(&connection).await?;
+    verify_power_profiles_available(&connection).await?;
+
+    info!(
+        service_path = %service_path.display(),
+        executable = %executable.display(),
+        "verified systemd user service"
+    );
+
+    Ok(())
+}
+
 async fn run() -> Result<(), Box<dyn Error>> {
-    
     let connection = Connection::system().await?;
 
     apply_profile_for_current_power_source(&connection).await?;
@@ -223,8 +262,19 @@ fn render_service_unit(executable: &std::path::Path) -> String {
     unit
 }
 
+fn parse_exec_start(unit: &str) -> Option<&str> {
+    unit.lines()
+        .find_map(|line| line.strip_prefix("ExecStart="))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn escape_systemd_exec_argument(path: &std::path::Path) -> String {
     path.display().to_string().replace(' ', "\\x20")
+}
+
+fn unescape_systemd_exec_argument(value: &str) -> String {
+    value.replace("\\x20", " ")
 }
 
 async fn run_systemctl_user<const N: usize>(args: [&str; N]) -> Result<(), Box<dyn Error>> {
@@ -251,7 +301,70 @@ async fn run_systemctl_user<const N: usize>(args: [&str; N]) -> Result<(), Box<d
     Err(format!("systemctl --user {} failed: {}", args.join(" "), details).into())
 }
 
-async fn apply_profile_for_current_power_source(connection: &Connection) -> Result<(), Box<dyn Error>> {
+async fn run_systemctl_user_expect_output<const N: usize>(
+    args: [&str; N],
+    expected: &str,
+    state_description: &str,
+) -> Result<(), Box<dyn Error>> {
+    let output = Command::new("systemctl")
+        .args(["--user"])
+        .args(args)
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() && stdout == expected {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let details = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        format!("expected {expected}, got {stdout}")
+    } else {
+        format!("systemctl exited with status {}", output.status)
+    };
+
+    Err(format!(
+        "service is not {state_description}: systemctl --user {} failed: {}",
+        args.join(" "),
+        details
+    )
+    .into())
+}
+
+async fn verify_upower_available(connection: &Connection) -> Result<(), Box<dyn Error>> {
+    let properties_proxy = PropertiesProxy::builder(connection)
+        .destination(UPOWER_DESTINATION)?
+        .path(UPOWER_PATH)?
+        .build()
+        .await?;
+    let _: bool = properties_proxy
+        .get(InterfaceName::try_from(UPOWER_INTERFACE)?, "OnBattery")
+        .await?
+        .try_into()?;
+    Ok(())
+}
+
+async fn verify_power_profiles_available(connection: &Connection) -> Result<(), Box<dyn Error>> {
+    let properties_proxy = PropertiesProxy::builder(connection)
+        .destination(POWER_PROFILES_DESTINATION)?
+        .path(POWER_PROFILES_PATH)?
+        .build()
+        .await?;
+    let _: zbus::zvariant::OwnedValue = properties_proxy
+        .get(
+            InterfaceName::try_from(POWER_PROFILES_INTERFACE)?,
+            "Profiles",
+        )
+        .await?;
+    Ok(())
+}
+
+async fn apply_profile_for_current_power_source(
+    connection: &Connection,
+) -> Result<(), Box<dyn Error>> {
     let power_source = current_power_source(connection).await?;
     let current_profile = active_profile(connection).await?;
     match decide_profile_action(power_source, &current_profile) {
@@ -282,10 +395,7 @@ async fn current_power_source(connection: &Connection) -> Result<PowerSource, Bo
         .build()
         .await?;
     let value = properties_proxy
-        .get(
-            InterfaceName::try_from(UPOWER_INTERFACE)?,
-            "OnBattery",
-        )
+        .get(InterfaceName::try_from(UPOWER_INTERFACE)?, "OnBattery")
         .await?;
     let value: bool = value.try_into()?;
     Ok(PowerSource::from_on_battery(value))
@@ -340,11 +450,7 @@ fn should_handle_properties_changed(interface_name: &str, changed_properties: &[
 
 impl PowerSource {
     fn from_on_battery(on_battery: bool) -> Self {
-        if on_battery {
-            Self::Battery
-        } else {
-            Self::Ac
-        }
+        if on_battery { Self::Battery } else { Self::Ac }
     }
 
     fn desired_profile(self) -> &'static str {
@@ -536,6 +642,12 @@ mod tests {
     }
 
     #[test]
+    fn verify_service_subcommand_parses() {
+        let cli = Cli::parse_from(["power-profile-watcher", "verify-service"]);
+        assert!(matches!(cli.command, Some(Commands::VerifyService)));
+    }
+
+    #[test]
     fn service_dir_is_under_home_config_systemd_user() {
         let original_home = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", "/tmp/power-profile-watcher-home") };
@@ -547,7 +659,10 @@ mod tests {
             None => unsafe { std::env::remove_var("HOME") },
         }
 
-        assert_eq!(dir, PathBuf::from("/tmp/power-profile-watcher-home/.config/systemd/user"));
+        assert_eq!(
+            dir,
+            PathBuf::from("/tmp/power-profile-watcher-home/.config/systemd/user")
+        );
     }
 
     #[test]
@@ -559,5 +674,43 @@ mod tests {
         assert!(unit.contains("ExecStart=/tmp/build\\x20output/power-profile-watcher"));
         assert!(unit.contains("Environment=RUST_LOG=info"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn parses_exec_start_from_service_unit() {
+        let unit = render_service_unit(std::path::Path::new(
+            "/tmp/build output/power-profile-watcher",
+        ));
+
+        assert_eq!(
+            parse_exec_start(&unit),
+            Some("/tmp/build\\x20output/power-profile-watcher")
+        );
+    }
+
+    #[test]
+    fn parse_exec_start_returns_none_when_missing() {
+        assert_eq!(parse_exec_start("[Service]\nType=simple\n"), None);
+    }
+
+    #[test]
+    fn unescapes_systemd_exec_argument_spaces() {
+        assert_eq!(
+            unescape_systemd_exec_argument("/tmp/build\\x20output/power-profile-watcher"),
+            "/tmp/build output/power-profile-watcher"
+        );
+    }
+
+    #[test]
+    fn extracts_existing_binary_path_from_rendered_service_unit() {
+        let unit = render_service_unit(std::path::Path::new(
+            "/tmp/build output/power-profile-watcher",
+        ));
+        let exec_start = parse_exec_start(&unit).expect("ExecStart should be present");
+
+        assert_eq!(
+            PathBuf::from(unescape_systemd_exec_argument(exec_start)),
+            PathBuf::from("/tmp/build output/power-profile-watcher")
+        );
     }
 }

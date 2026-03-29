@@ -115,22 +115,30 @@ The generated unit sets `Environment=RUST_LOG=info`, so it emits normal log outp
 
 ## Verify
 
-Check service status:
+Use the built-in verification command:
 
 ```bash
-systemctl --user status power-profile-watcher.service
+target/release/power-profile-watcher verify-service
 ```
+
+If you installed it with `cargo install --path .`, run:
+
+```bash
+power-profile-watcher verify-service
+```
+
+This checks that:
+
+- `~/.config/systemd/user/power-profile-watcher.service` exists
+- the `ExecStart` binary referenced by the installed service exists
+- the service is enabled and active in the user systemd manager
+- `UPower` is reachable over D-Bus
+- `power-profiles-daemon` is reachable over D-Bus
 
 Watch service logs:
 
 ```bash
 journalctl --user -u power-profile-watcher.service -f
-```
-
-Check the current active profile:
-
-```bash
-powerprofilesctl get
 ```
 
 Then test the actual behavior:
