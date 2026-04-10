@@ -265,7 +265,7 @@ fn render_service_unit(executable: &std::path::Path) -> String {
     let mut unit = String::new();
     let _ = write!(
         unit,
-        "[Unit]\nDescription=Watch power source and switch power profiles\nAfter=graphical-session.target\nWants=graphical-session.target\n\n[Service]\nType=simple\nExecStart={}\nEnvironment=RUST_LOG=info\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Watch power source and switch power profiles\nAfter=graphical-session.target\nPartOf=graphical-session.target\n\n[Service]\nType=simple\nExecStart={}\nEnvironment=RUST_LOG=info\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=graphical-session.target\n",
         escaped_executable
     );
     unit
@@ -758,7 +758,16 @@ mod tests {
 
         assert!(unit.contains("ExecStart=/tmp/build\\x20output/power-profile-watcher"));
         assert!(unit.contains("Environment=RUST_LOG=info"));
-        assert!(unit.contains("WantedBy=default.target"));
+        assert!(unit.contains("PartOf=graphical-session.target"));
+        assert!(unit.contains("WantedBy=graphical-session.target"));
+    }
+
+    #[test]
+    fn rendered_service_does_not_pull_graphical_session_in_from_default_target() {
+        let unit = render_service_unit(std::path::Path::new("/tmp/power-profile-watcher"));
+
+        assert!(!unit.contains("Wants=graphical-session.target"));
+        assert!(!unit.contains("WantedBy=default.target"));
     }
 
     #[test]

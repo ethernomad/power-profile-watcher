@@ -111,6 +111,8 @@ power-profile-watcher install-service
 
 This stops `power-profile-watcher.service` first if it is active, writes `~/.config/systemd/user/power-profile-watcher.service`, reloads the user manager, and runs `systemctl --user enable --now power-profile-watcher.service`.
 
+The installed user service is tied to `graphical-session.target`, so it starts only for graphical logins and stops automatically when the graphical session ends.
+
 The generated unit sets `Environment=RUST_LOG=info`, so it emits normal log output by default.
 
 ## Verify
@@ -131,7 +133,8 @@ This checks that:
 
 - `~/.config/systemd/user/power-profile-watcher.service` exists
 - the `ExecStart` binary referenced by the installed service exists
-- the service is enabled and active in the user systemd manager
+- the service is enabled in the user systemd manager
+- the service is active while a graphical session is running
 
 Normal daemon startup separately verifies that `UPower` and `power-profiles-daemon` are reachable over D-Bus before it begins watching for power-source changes.
 
