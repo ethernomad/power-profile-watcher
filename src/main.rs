@@ -67,13 +67,16 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Install and enable the systemd user service
-    InstallService,
+    #[command(name = "install-service")]
+    Install,
 
     /// Verify the installed systemd user service
-    VerifyService,
+    #[command(name = "verify-service")]
+    Verify,
 
     /// Disable and uninstall the systemd user service
-    UninstallService,
+    #[command(name = "uninstall-service")]
+    Uninstall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,9 +122,9 @@ async fn main() {
         .init();
 
     let result = match cli.command {
-        Some(Commands::InstallService) => install_service().await,
-        Some(Commands::VerifyService) => verify_service().await,
-        Some(Commands::UninstallService) => uninstall_service().await,
+        Some(Commands::Install) => install_service().await,
+        Some(Commands::Verify) => verify_service().await,
+        Some(Commands::Uninstall) => uninstall_service().await,
         None => run().await,
     };
 
@@ -158,10 +161,10 @@ async fn uninstall_service() -> Result<(), Box<dyn Error>> {
     let service_path = service_dir()?.join(SERVICE_NAME);
 
     let disable_result = run_systemctl_user(["disable", "--now", SERVICE_NAME]).await;
-    if let Err(err) = disable_result {
-        if service_path.exists() {
-            return Err(err);
-        }
+    if let Err(err) = disable_result
+        && service_path.exists()
+    {
+        return Err(err);
     }
 
     match tokio::fs::remove_file(&service_path).await {
@@ -643,17 +646,16 @@ fn spawn_upower_watcher(connection: Connection, event_tx: mpsc::Sender<Result<Wa
                 let changed_property_names: Vec<&str> = args
                     .changed_properties
                     .keys()
-                    .map(|name| <_ as AsRef<str>>::as_ref(name))
+                    .map(<_ as AsRef<str>>::as_ref)
                     .collect();
                 if should_handle_properties_changed(
                     UPOWER_INTERFACE,
                     "OnBattery",
                     args.interface_name.as_str(),
                     &changed_property_names,
-                ) {
-                    if event_tx.send(Ok(WatchEvent::PowerSourceChanged)).await.is_err() {
-                        break;
-                    }
+                ) && event_tx.send(Ok(WatchEvent::PowerSourceChanged)).await.is_err()
+                {
+                    break;
                 }
             }
 
@@ -947,19 +949,19 @@ mod tests {
     #[test]
     fn install_service_subcommand_parses() {
         let cli = Cli::parse_from(["power-profile-watcher", "install-service"]);
-        assert!(matches!(cli.command, Some(Commands::InstallService)));
+        assert!(matches!(cli.command, Some(Commands::Install)));
     }
 
     #[test]
     fn uninstall_service_subcommand_parses() {
         let cli = Cli::parse_from(["power-profile-watcher", "uninstall-service"]);
-        assert!(matches!(cli.command, Some(Commands::UninstallService)));
+        assert!(matches!(cli.command, Some(Commands::Uninstall)));
     }
 
     #[test]
     fn verify_service_subcommand_parses() {
         let cli = Cli::parse_from(["power-profile-watcher", "verify-service"]);
-        assert!(matches!(cli.command, Some(Commands::VerifyService)));
+        assert!(matches!(cli.command, Some(Commands::Verify)));
     }
 
     #[test]
