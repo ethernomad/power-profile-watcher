@@ -9,6 +9,7 @@ use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use zbus::Connection;
+use zbus::Proxy;
 use zbus::fdo::PropertiesProxy;
 use zbus::names::InterfaceName;
 use zbus::zvariant::Value;
@@ -564,6 +565,11 @@ fn should_handle_properties_changed(
     interface_name == expected_interface_name && changed_properties.contains(&expected_property)
 }
 
+fn parse_lock_state_changed_signal(active: bool) -> WatchEvent {
+    let _ = active;
+    WatchEvent::LockStateChanged
+}
+
 async fn discover_lock_state_provider(
     session_connection: &Connection,
 ) -> Result<Option<LockStateProvider>, Box<dyn Error>> {
@@ -601,16 +607,15 @@ async fn lock_state(
     session_connection: &Connection,
     provider: &LockStateProvider,
 ) -> Result<LockState, Box<dyn Error>> {
-    let properties_proxy = PropertiesProxy::builder(session_connection)
-        .destination(provider.destination)?
-        .path(provider.path)?
-        .build()
-        .await?;
-    let value = properties_proxy
-        .get(InterfaceName::try_from(provider.interface)?, "Active")
-        .await?;
-    let value: bool = value.try_into()?;
-    Ok(LockState::from_active(value))
+    let proxy = Proxy::new(
+        session_connection,
+        provider.destination,
+        provider.path,
+        provider.interface,
+    )
+    .await?;
+    let active: bool = proxy.call("GetActive", &()).await?;
+    Ok(LockState::from_active(active))
 }
 
 fn spawn_upower_watcher(connection: Connection, event_tx: mpsc::Sender<Result<WatchEvent, String>>) {
@@ -669,39 +674,31 @@ fn spawn_lock_state_watcher(
 ) {
     tokio::spawn(async move {
         let result: Result<(), String> = async {
-            let properties_proxy = PropertiesProxy::builder(&connection)
-                .destination(provider.destination)
-                .map_err(|err| err.to_string())?
-                .path(provider.path)
-                .map_err(|err| err.to_string())?
-                .build()
-                .await
-                .map_err(|err| err.to_string())?;
-            let mut changes = properties_proxy
-                .receive_properties_changed()
+            let proxy = Proxy::new(
+                &connection,
+                provider.destination,
+                provider.path,
+                provider.interface,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            let mut changes = proxy
+                .receive_signal("ActiveChanged")
                 .await
                 .map_err(|err| err.to_string())?;
 
             loop {
                 let Some(signal) = changes.next().await else {
-                    return Err("lock-state properties stream ended".to_string());
+                    return Err("lock-state signal stream ended".to_string());
                 };
 
-                let args = signal.args().map_err(|err| err.to_string())?;
-                let changed_property_names: Vec<&str> = args
-                    .changed_properties
-                    .keys()
-                    .map(|name| <_ as AsRef<str>>::as_ref(name))
-                    .collect();
-                if should_handle_properties_changed(
-                    provider.interface,
-                    "Active",
-                    args.interface_name.as_str(),
-                    &changed_property_names,
-                ) {
-                    if event_tx.send(Ok(WatchEvent::LockStateChanged)).await.is_err() {
-                        break;
-                    }
+                let active: bool = signal
+                    .body()
+                    .deserialize()
+                    .map_err(|err| err.to_string())?;
+                let event = parse_lock_state_changed_signal(active);
+                if event_tx.send(Ok(event)).await.is_err() {
+                    break;
                 }
             }
 
@@ -1087,6 +1084,26 @@ mod tests {
             result.unwrap_err().to_string(),
             "service executable is incorrect: expected /home/jbrown/.cargo/bin/power-profile-watcher, found /usr/bin/power-profile-watcher"
         );
+    }
+
+    #[test]
+    fn parses_lock_state_changed_signal_when_active_is_true() {
+        assert_eq!(parse_lock_state_changed_signal(true), WatchEvent::LockStateChanged);
+    }
+
+    #[test]
+    fn parses_lock_state_changed_signal_when_active_is_false() {
+        assert_eq!(parse_lock_state_changed_signal(false), WatchEvent::LockStateChanged);
+    }
+
+    #[test]
+    fn lock_state_from_active_true_is_locked() {
+        assert_eq!(LockState::from_active(true), LockState::Locked);
+    }
+
+    #[test]
+    fn lock_state_from_active_false_is_unlocked() {
+        assert_eq!(LockState::from_active(false), LockState::Unlocked);
     }
 
     #[test]
