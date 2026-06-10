@@ -6,7 +6,8 @@ use clap::{ColorChoice, Parser, Subcommand};
 use futures_util::StreamExt;
 use tokio::process::Command;
 use tokio::signal;
-use tracing::{error, info};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 use zbus::Connection;
 use zbus::fdo::PropertiesProxy;
 use zbus::names::InterfaceName;
@@ -21,6 +22,12 @@ const UPOWER_INTERFACE: &str = "org.freedesktop.UPower";
 const PROFILE_PERFORMANCE: &str = "performance";
 const PROFILE_POWERSAVE: &str = "power-saver";
 const SERVICE_NAME: &str = "power-profile-watcher.service";
+const FREEDESKTOP_SCREENSAVER_DESTINATION: &str = "org.freedesktop.ScreenSaver";
+const FREEDESKTOP_SCREENSAVER_PATH: &str = "/org/freedesktop/ScreenSaver";
+const FREEDESKTOP_SCREENSAVER_INTERFACE: &str = "org.freedesktop.ScreenSaver";
+const GNOME_SCREENSAVER_DESTINATION: &str = "org.gnome.ScreenSaver";
+const GNOME_SCREENSAVER_PATH: &str = "/org/gnome/ScreenSaver";
+const GNOME_SCREENSAVER_INTERFACE: &str = "org.gnome.ScreenSaver";
 
 fn clap_styles() -> clap::builder::Styles {
     use clap::builder::styling::{AnsiColor, Effects, Styles};
@@ -78,6 +85,25 @@ enum PowerSource {
 enum ProfileDecision {
     Unchanged { desired_profile: &'static str },
     Change { desired_profile: &'static str },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockState {
+    Locked,
+    Unlocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LockStateProvider {
+    destination: &'static str,
+    path: &'static str,
+    interface: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchEvent {
+    PowerSourceChanged,
+    LockStateChanged,
 }
 
 #[tokio::main]
@@ -186,43 +212,55 @@ async fn verify_service() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    let connection = Connection::system().await?;
+    let system_connection = Connection::system().await?;
+    let session_connection = Connection::session().await?;
 
-    verify_upower_available(&connection).await?;
-    verify_power_profiles_available(&connection).await?;
+    verify_upower_available(&system_connection).await?;
+    verify_power_profiles_available(&system_connection).await?;
+    let lock_state_provider = discover_lock_state_provider(&session_connection).await?;
 
-    apply_profile_for_current_power_source(&connection).await?;
+    apply_profile_for_current_state(
+        &system_connection,
+        &session_connection,
+        lock_state_provider.as_ref(),
+    )
+    .await?;
 
-    let properties_proxy = PropertiesProxy::builder(&connection)
-        .destination(UPOWER_DESTINATION)?
-        .path(UPOWER_PATH)?
-        .build()
-        .await?;
-    let mut changes = properties_proxy.receive_properties_changed().await?;
+    let (event_tx, mut event_rx) = mpsc::channel::<Result<WatchEvent, String>>(8);
+
+    spawn_upower_watcher(system_connection.clone(), event_tx.clone());
+
+    if let Some(provider) = lock_state_provider {
+        spawn_lock_state_watcher(session_connection.clone(), provider, event_tx.clone());
+        info!(
+            destination = provider.destination,
+            interface = provider.interface,
+            path = provider.path,
+            "watching session lock-state changes"
+        );
+    } else {
+        warn!("no compatible session lock-state provider found; falling back to AC/battery-only behavior");
+    }
 
     info!("watching UPower for power-source changes");
 
     loop {
         tokio::select! {
-            maybe_signal = changes.next() => {
-                let Some(signal) = maybe_signal else {
-                    return Err("UPower properties stream ended".into());
+            maybe_event = event_rx.recv() => {
+                let Some(event) = maybe_event else {
+                    return Err("event stream ended unexpectedly".into());
                 };
 
-                let args = signal.args()?;
-                let changed_property_names: Vec<&str> = args
-                    .changed_properties
-                    .keys()
-                    .map(|name| <_ as AsRef<str>>::as_ref(name))
-                    .collect();
-                if !should_handle_properties_changed(
-                    args.interface_name.as_str(),
-                    &changed_property_names,
-                ) {
-                    continue;
+                match event {
+                    Ok(WatchEvent::PowerSourceChanged) | Ok(WatchEvent::LockStateChanged) => {
+                        apply_profile_for_current_state(
+                            &system_connection,
+                            &session_connection,
+                            lock_state_provider.as_ref(),
+                        ).await?;
+                    }
+                    Err(err) => return Err(err.into()),
                 }
-
-                apply_profile_for_current_power_source(&connection).await?;
             }
             ctrl_c = signal::ctrl_c() => {
                 ctrl_c?;
@@ -418,23 +456,28 @@ async fn verify_power_profiles_available(connection: &Connection) -> Result<(), 
     Ok(())
 }
 
-async fn apply_profile_for_current_power_source(
-    connection: &Connection,
+async fn apply_profile_for_current_state(
+    system_connection: &Connection,
+    session_connection: &Connection,
+    lock_state_provider: Option<&LockStateProvider>,
 ) -> Result<(), Box<dyn Error>> {
-    let power_source = current_power_source(connection).await?;
-    let current_profile = active_profile(connection).await?;
-    match decide_profile_action(power_source, &current_profile) {
+    let power_source = current_power_source(system_connection).await?;
+    let lock_state = current_lock_state(session_connection, lock_state_provider).await?;
+    let current_profile = active_profile(system_connection).await?;
+    match decide_profile_action(power_source, lock_state, &current_profile) {
         ProfileDecision::Unchanged { desired_profile } => {
             info!(
                 source = power_source.label(),
+                locked = lock_state.map(LockState::label),
                 profile = desired_profile,
-                "power source unchanged for profile selection"
+                "current state already matches desired profile"
             );
         }
         ProfileDecision::Change { desired_profile } => {
-            set_active_profile(connection, desired_profile).await?;
+            set_active_profile(system_connection, desired_profile).await?;
             info!(
                 source = power_source.label(),
+                locked = lock_state.map(LockState::label),
                 profile = desired_profile,
                 "set active profile"
             );
@@ -490,8 +533,12 @@ async fn set_active_profile(connection: &Connection, profile: &str) -> Result<()
     Ok(())
 }
 
-fn decide_profile_action(power_source: PowerSource, current_profile: &str) -> ProfileDecision {
-    let desired_profile = power_source.desired_profile();
+fn decide_profile_action(
+    power_source: PowerSource,
+    lock_state: Option<LockState>,
+    current_profile: &str,
+) -> ProfileDecision {
+    let desired_profile = desired_profile(power_source, lock_state);
 
     if current_profile == desired_profile {
         ProfileDecision::Unchanged { desired_profile }
@@ -500,8 +547,172 @@ fn decide_profile_action(power_source: PowerSource, current_profile: &str) -> Pr
     }
 }
 
-fn should_handle_properties_changed(interface_name: &str, changed_properties: &[&str]) -> bool {
-    interface_name == UPOWER_INTERFACE && changed_properties.contains(&"OnBattery")
+fn desired_profile(power_source: PowerSource, lock_state: Option<LockState>) -> &'static str {
+    match (power_source, lock_state) {
+        (PowerSource::Battery, _) => PROFILE_POWERSAVE,
+        (PowerSource::Ac, Some(LockState::Locked)) => PROFILE_POWERSAVE,
+        (PowerSource::Ac, Some(LockState::Unlocked) | None) => PROFILE_PERFORMANCE,
+    }
+}
+
+fn should_handle_properties_changed(
+    expected_interface_name: &str,
+    expected_property: &str,
+    interface_name: &str,
+    changed_properties: &[&str],
+) -> bool {
+    interface_name == expected_interface_name && changed_properties.contains(&expected_property)
+}
+
+async fn discover_lock_state_provider(
+    session_connection: &Connection,
+) -> Result<Option<LockStateProvider>, Box<dyn Error>> {
+    for provider in [
+        LockStateProvider {
+            destination: FREEDESKTOP_SCREENSAVER_DESTINATION,
+            path: FREEDESKTOP_SCREENSAVER_PATH,
+            interface: FREEDESKTOP_SCREENSAVER_INTERFACE,
+        },
+        LockStateProvider {
+            destination: GNOME_SCREENSAVER_DESTINATION,
+            path: GNOME_SCREENSAVER_PATH,
+            interface: GNOME_SCREENSAVER_INTERFACE,
+        },
+    ] {
+        if lock_state(session_connection, &provider).await.is_ok() {
+            return Ok(Some(provider));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn current_lock_state(
+    session_connection: &Connection,
+    lock_state_provider: Option<&LockStateProvider>,
+) -> Result<Option<LockState>, Box<dyn Error>> {
+    match lock_state_provider {
+        Some(provider) => Ok(Some(lock_state(session_connection, provider).await?)),
+        None => Ok(None),
+    }
+}
+
+async fn lock_state(
+    session_connection: &Connection,
+    provider: &LockStateProvider,
+) -> Result<LockState, Box<dyn Error>> {
+    let properties_proxy = PropertiesProxy::builder(session_connection)
+        .destination(provider.destination)?
+        .path(provider.path)?
+        .build()
+        .await?;
+    let value = properties_proxy
+        .get(InterfaceName::try_from(provider.interface)?, "Active")
+        .await?;
+    let value: bool = value.try_into()?;
+    Ok(LockState::from_active(value))
+}
+
+fn spawn_upower_watcher(connection: Connection, event_tx: mpsc::Sender<Result<WatchEvent, String>>) {
+    tokio::spawn(async move {
+        let result: Result<(), String> = async {
+            let properties_proxy = PropertiesProxy::builder(&connection)
+                .destination(UPOWER_DESTINATION)
+                .map_err(|err| err.to_string())?
+                .path(UPOWER_PATH)
+                .map_err(|err| err.to_string())?
+                .build()
+                .await
+                .map_err(|err| err.to_string())?;
+            let mut changes = properties_proxy
+                .receive_properties_changed()
+                .await
+                .map_err(|err| err.to_string())?;
+
+            loop {
+                let Some(signal) = changes.next().await else {
+                    return Err("UPower properties stream ended".to_string());
+                };
+
+                let args = signal.args().map_err(|err| err.to_string())?;
+                let changed_property_names: Vec<&str> = args
+                    .changed_properties
+                    .keys()
+                    .map(|name| <_ as AsRef<str>>::as_ref(name))
+                    .collect();
+                if should_handle_properties_changed(
+                    UPOWER_INTERFACE,
+                    "OnBattery",
+                    args.interface_name.as_str(),
+                    &changed_property_names,
+                ) {
+                    if event_tx.send(Ok(WatchEvent::PowerSourceChanged)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = result {
+            let _ = event_tx.send(Err(err)).await;
+        }
+    });
+}
+
+fn spawn_lock_state_watcher(
+    connection: Connection,
+    provider: LockStateProvider,
+    event_tx: mpsc::Sender<Result<WatchEvent, String>>,
+) {
+    tokio::spawn(async move {
+        let result: Result<(), String> = async {
+            let properties_proxy = PropertiesProxy::builder(&connection)
+                .destination(provider.destination)
+                .map_err(|err| err.to_string())?
+                .path(provider.path)
+                .map_err(|err| err.to_string())?
+                .build()
+                .await
+                .map_err(|err| err.to_string())?;
+            let mut changes = properties_proxy
+                .receive_properties_changed()
+                .await
+                .map_err(|err| err.to_string())?;
+
+            loop {
+                let Some(signal) = changes.next().await else {
+                    return Err("lock-state properties stream ended".to_string());
+                };
+
+                let args = signal.args().map_err(|err| err.to_string())?;
+                let changed_property_names: Vec<&str> = args
+                    .changed_properties
+                    .keys()
+                    .map(|name| <_ as AsRef<str>>::as_ref(name))
+                    .collect();
+                if should_handle_properties_changed(
+                    provider.interface,
+                    "Active",
+                    args.interface_name.as_str(),
+                    &changed_property_names,
+                ) {
+                    if event_tx.send(Ok(WatchEvent::LockStateChanged)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = result {
+            let _ = event_tx.send(Err(err)).await;
+        }
+    });
 }
 
 impl PowerSource {
@@ -509,17 +720,23 @@ impl PowerSource {
         if on_battery { Self::Battery } else { Self::Ac }
     }
 
-    fn desired_profile(self) -> &'static str {
-        match self {
-            Self::Ac => PROFILE_PERFORMANCE,
-            Self::Battery => PROFILE_POWERSAVE,
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::Ac => "ac",
             Self::Battery => "battery",
+        }
+    }
+}
+
+impl LockState {
+    fn from_active(active: bool) -> Self {
+        if active { Self::Locked } else { Self::Unlocked }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Locked => "true",
+            Self::Unlocked => "false",
         }
     }
 }
@@ -535,13 +752,23 @@ mod tests {
     }
 
     #[test]
-    fn maps_ac_to_performance_profile() {
-        assert_eq!(PowerSource::Ac.desired_profile(), PROFILE_PERFORMANCE);
+    fn maps_ac_unlocked_to_performance_profile() {
+        assert_eq!(desired_profile(PowerSource::Ac, Some(LockState::Unlocked)), PROFILE_PERFORMANCE);
+    }
+
+    #[test]
+    fn maps_ac_locked_to_power_saver_profile() {
+        assert_eq!(desired_profile(PowerSource::Ac, Some(LockState::Locked)), PROFILE_POWERSAVE);
     }
 
     #[test]
     fn maps_battery_to_power_saver_profile() {
-        assert_eq!(PowerSource::Battery.desired_profile(), PROFILE_POWERSAVE);
+        assert_eq!(desired_profile(PowerSource::Battery, Some(LockState::Unlocked)), PROFILE_POWERSAVE);
+    }
+
+    #[test]
+    fn maps_ac_without_lock_provider_to_performance_profile() {
+        assert_eq!(desired_profile(PowerSource::Ac, None), PROFILE_PERFORMANCE);
     }
 
     #[test]
@@ -555,9 +782,9 @@ mod tests {
     }
 
     #[test]
-    fn keeps_profile_unchanged_when_ac_already_performance() {
+    fn keeps_profile_unchanged_when_ac_unlocked_already_performance() {
         assert_eq!(
-            decide_profile_action(PowerSource::Ac, PROFILE_PERFORMANCE),
+            decide_profile_action(PowerSource::Ac, Some(LockState::Unlocked), PROFILE_PERFORMANCE),
             ProfileDecision::Unchanged {
                 desired_profile: PROFILE_PERFORMANCE,
             }
@@ -565,11 +792,11 @@ mod tests {
     }
 
     #[test]
-    fn changes_profile_when_ac_is_not_performance() {
+    fn changes_profile_when_ac_locked_is_not_power_saver() {
         assert_eq!(
-            decide_profile_action(PowerSource::Ac, PROFILE_POWERSAVE),
+            decide_profile_action(PowerSource::Ac, Some(LockState::Locked), PROFILE_PERFORMANCE),
             ProfileDecision::Change {
-                desired_profile: PROFILE_PERFORMANCE,
+                desired_profile: PROFILE_POWERSAVE,
             }
         );
     }
@@ -577,7 +804,7 @@ mod tests {
     #[test]
     fn keeps_profile_unchanged_when_battery_already_power_saver() {
         assert_eq!(
-            decide_profile_action(PowerSource::Battery, PROFILE_POWERSAVE),
+            decide_profile_action(PowerSource::Battery, Some(LockState::Unlocked), PROFILE_POWERSAVE),
             ProfileDecision::Unchanged {
                 desired_profile: PROFILE_POWERSAVE,
             }
@@ -587,7 +814,7 @@ mod tests {
     #[test]
     fn changes_profile_when_battery_is_not_power_saver() {
         assert_eq!(
-            decide_profile_action(PowerSource::Battery, PROFILE_PERFORMANCE),
+            decide_profile_action(PowerSource::Battery, Some(LockState::Unlocked), PROFILE_PERFORMANCE),
             ProfileDecision::Change {
                 desired_profile: PROFILE_POWERSAVE,
             }
@@ -595,8 +822,20 @@ mod tests {
     }
 
     #[test]
+    fn keeps_profile_unchanged_when_ac_without_lock_provider_already_performance() {
+        assert_eq!(
+            decide_profile_action(PowerSource::Ac, None, PROFILE_PERFORMANCE),
+            ProfileDecision::Unchanged {
+                desired_profile: PROFILE_PERFORMANCE,
+            }
+        );
+    }
+
+    #[test]
     fn ignores_unrelated_interface_changes() {
         assert!(!should_handle_properties_changed(
+            UPOWER_INTERFACE,
+            "OnBattery",
             "org.example.Other",
             &["OnBattery"],
         ));
@@ -606,6 +845,8 @@ mod tests {
     fn ignores_upower_changes_without_on_battery_property() {
         assert!(!should_handle_properties_changed(
             UPOWER_INTERFACE,
+            "OnBattery",
+            UPOWER_INTERFACE,
             &["LidIsClosed", "DaemonVersion"],
         ));
     }
@@ -613,6 +854,8 @@ mod tests {
     #[test]
     fn handles_upower_on_battery_property_changes() {
         assert!(should_handle_properties_changed(
+            UPOWER_INTERFACE,
+            "OnBattery",
             UPOWER_INTERFACE,
             &["OnBattery"],
         ));
@@ -622,7 +865,19 @@ mod tests {
     fn handles_upower_changes_when_on_battery_is_one_of_many_properties() {
         assert!(should_handle_properties_changed(
             UPOWER_INTERFACE,
+            "OnBattery",
+            UPOWER_INTERFACE,
             &["LidIsClosed", "OnBattery", "DaemonVersion"],
+        ));
+    }
+
+    #[test]
+    fn handles_lock_state_active_property_changes() {
+        assert!(should_handle_properties_changed(
+            FREEDESKTOP_SCREENSAVER_INTERFACE,
+            "Active",
+            FREEDESKTOP_SCREENSAVER_INTERFACE,
+            &["Active"],
         ));
     }
 
@@ -630,6 +885,12 @@ mod tests {
     fn power_source_labels_are_stable_for_logging() {
         assert_eq!(PowerSource::Ac.label(), "ac");
         assert_eq!(PowerSource::Battery.label(), "battery");
+    }
+
+    #[test]
+    fn lock_state_labels_are_stable_for_logging() {
+        assert_eq!(LockState::Locked.label(), "true");
+        assert_eq!(LockState::Unlocked.label(), "false");
     }
 
     #[test]

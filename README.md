@@ -1,11 +1,14 @@
 # power-profile-watcher
 
-`power-profile-watcher` is a small Rust daemon that watches `UPower` for AC/battery changes and updates `power-profiles-daemon` automatically:
+`power-profile-watcher` is a small Rust daemon that watches `UPower` for AC/battery changes and updates `power-profiles-daemon` automatically.
 
-- AC power: `performance`
+By default, it applies these rules:
+
 - Battery power: `power-saver`
+- AC power while the desktop session is locked: `power-saver`
+- AC power while the desktop session is unlocked: `performance`
 
-It does an initial sync on startup and then only changes profiles when the power source changes. Manual profile changes still work normally until the next plug/unplug event.
+It does an initial sync on startup and then only changes profiles when the power source or desktop lock state changes. Manual profile changes still work normally until the next relevant event.
 
 ## Requirements
 
@@ -14,12 +17,17 @@ This program requires these services to be present and running:
 - `org.freedesktop.UPower`
 - `net.hadess.PowerProfiles`
 
-On this machine, those are provided by:
+For lock-state-aware behavior, it also tries to use one of these session D-Bus providers:
+
+- `org.freedesktop.ScreenSaver`
+- `org.gnome.ScreenSaver`
+
+On this machine, the required system services are typically provided by:
 
 - `upower`
 - `power-profiles-daemon`
 
-You can verify availability with:
+You can verify system-bus availability with:
 
 ```bash
 busctl get-property org.freedesktop.UPower /org/freedesktop/UPower org.freedesktop.UPower OnBattery
@@ -136,7 +144,7 @@ This checks that:
 - the service is enabled in the user systemd manager
 - the service is active while a graphical session is running
 
-Normal daemon startup separately verifies that `UPower` and `power-profiles-daemon` are reachable over D-Bus before it begins watching for power-source changes.
+Normal daemon startup separately verifies that `UPower` and `power-profiles-daemon` are reachable over D-Bus before it begins watching for state changes. It also attempts to discover a compatible session-bus lock-state provider. If none is available, it logs a warning and falls back to AC/battery-only behavior.
 
 Watch service logs:
 
@@ -146,9 +154,11 @@ journalctl --user -u power-profile-watcher.service -f
 
 Then test the actual behavior:
 
-1. Plug in AC power and confirm the profile becomes `performance`.
-2. Unplug AC power and confirm the profile becomes `power-saver`.
-3. Manually change the profile in GNOME and confirm it stays changed until the next AC state transition.
+1. Plug in AC power while the desktop is unlocked and confirm the profile becomes `performance`.
+2. Lock the desktop while still plugged in and confirm the profile becomes `power-saver`.
+3. Unlock the desktop while still plugged in and confirm the profile returns to `performance`.
+4. Unplug AC power and confirm the profile becomes `power-saver`.
+5. Manually change the profile in your desktop environment and confirm it stays changed until the next relevant power or lock-state transition.
 
 ## Update After Code Changes
 
@@ -179,6 +189,7 @@ This disables the service, removes `~/.config/systemd/user/power-profile-watcher
 
 ## Notes
 
-- This program is not GNOME-specific. It works anywhere `UPower` and `power-profiles-daemon` are available.
+- This program is not strictly GNOME-specific. It prefers `org.freedesktop.ScreenSaver` for lock-state detection and falls back to `org.gnome.ScreenSaver` when needed.
+- If no supported lock-state provider is available on the session bus, it still works with AC/battery-only behavior.
 - It uses direct D-Bus calls instead of spawning `powerprofilesctl`.
 - It is event-driven. It does not poll.
