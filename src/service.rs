@@ -222,3 +222,121 @@ pub async fn run_systemctl_user_expect_output<const N: usize>(
     )
     .into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_dir_is_under_home_config_systemd_user() {
+        let original_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/tmp/power-profile-watcher-home") };
+
+        let dir = service_dir().expect("service dir should resolve");
+
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert_eq!(
+            dir,
+            PathBuf::from("/tmp/power-profile-watcher-home/.config/systemd/user")
+        );
+    }
+
+    #[test]
+    fn rendered_service_uses_resolved_executable_path() {
+        let unit = render_service_unit(std::path::Path::new(
+            "/tmp/build output/power-profile-watcher",
+        ));
+
+        assert!(unit.contains("ExecStart=/tmp/build\\x20output/power-profile-watcher"));
+        assert!(unit.contains("Environment=RUST_LOG=info"));
+        assert!(unit.contains("PartOf=graphical-session.target"));
+        assert!(unit.contains("WantedBy=graphical-session.target"));
+    }
+
+    #[test]
+    fn rendered_service_does_not_pull_graphical_session_in_from_default_target() {
+        let unit = render_service_unit(std::path::Path::new("/tmp/power-profile-watcher"));
+
+        assert!(!unit.contains("Wants=graphical-session.target"));
+        assert!(!unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn parses_exec_start_from_service_unit() {
+        let unit = render_service_unit(std::path::Path::new(
+            "/tmp/build output/power-profile-watcher",
+        ));
+
+        assert_eq!(
+            parse_exec_start(&unit),
+            Some("/tmp/build\\x20output/power-profile-watcher")
+        );
+    }
+
+    #[test]
+    fn parse_exec_start_returns_none_when_missing() {
+        assert_eq!(parse_exec_start("[Service]\nType=simple\n"), None);
+    }
+
+    #[test]
+    fn unescapes_systemd_exec_argument_spaces() {
+        assert_eq!(
+            unescape_systemd_exec_argument("/tmp/build\\x20output/power-profile-watcher"),
+            "/tmp/build output/power-profile-watcher"
+        );
+    }
+
+    #[test]
+    fn extracts_existing_binary_path_from_rendered_service_unit() {
+        let unit = render_service_unit(std::path::Path::new(
+            "/tmp/build output/power-profile-watcher",
+        ));
+        let exec_start = parse_exec_start(&unit).expect("ExecStart should be present");
+
+        assert_eq!(
+            PathBuf::from(unescape_systemd_exec_argument(exec_start)),
+            PathBuf::from("/tmp/build output/power-profile-watcher")
+        );
+    }
+
+    #[test]
+    fn verify_service_executable_accepts_expected_path() {
+        let executable = std::path::Path::new("/tmp/power-profile-watcher");
+
+        assert!(verify_service_executable(executable, executable).is_ok());
+    }
+
+    #[test]
+    fn verify_service_executable_rejects_wrong_existing_path() {
+        let result = verify_service_executable(
+            std::path::Path::new("/usr/bin/power-profile-watcher"),
+            std::path::Path::new("/home/jbrown/.cargo/bin/power-profile-watcher"),
+        );
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "service executable is incorrect: expected /home/jbrown/.cargo/bin/power-profile-watcher, found /usr/bin/power-profile-watcher"
+        );
+    }
+
+    #[test]
+    fn parses_active_systemctl_state() {
+        assert_eq!(parse_systemctl_is_active("active"), Some(true));
+    }
+
+    #[test]
+    fn parses_inactive_systemctl_states() {
+        for state in ["inactive", "failed", "activating", "deactivating", "unknown"] {
+            assert_eq!(parse_systemctl_is_active(state), Some(false));
+        }
+    }
+
+    #[test]
+    fn returns_none_for_unexpected_systemctl_state() {
+        assert_eq!(parse_systemctl_is_active("reloading"), None);
+    }
+}

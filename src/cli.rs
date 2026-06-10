@@ -48,3 +48,61 @@ pub enum Commands {
     #[command(name = "uninstall-service")]
     Uninstall,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use clap::CommandFactory;
+
+    #[test]
+    fn clap_styles_build_without_panicking() {
+        let _ = clap_styles();
+    }
+
+    #[test]
+    fn install_service_subcommand_parses() {
+        let cli = Cli::parse_from(["power-profile-watcher", "install-service"]);
+        assert!(matches!(cli.command, Some(Commands::Install)));
+    }
+
+    #[test]
+    fn uninstall_service_subcommand_parses() {
+        let cli = Cli::parse_from(["power-profile-watcher", "uninstall-service"]);
+        assert!(matches!(cli.command, Some(Commands::Uninstall)));
+    }
+
+    #[test]
+    fn verify_service_subcommand_parses() {
+        let cli = Cli::parse_from(["power-profile-watcher", "verify-service"]);
+        assert!(matches!(cli.command, Some(Commands::Verify)));
+    }
+
+    #[test]
+    fn verify_service_subcommand_has_updated_help_text() {
+        let command = Cli::command();
+        let verify_service = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "verify-service")
+            .expect("verify-service subcommand should exist");
+
+        assert_eq!(
+            verify_service.get_about().map(ToString::to_string),
+            Some("Verify the installed systemd user service".to_string())
+        );
+    }
+
+    #[test]
+    fn uninstall_service_subcommand_has_updated_help_text() {
+        let command = Cli::command();
+        let uninstall_service = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "uninstall-service")
+            .expect("uninstall-service subcommand should exist");
+
+        assert_eq!(
+            uninstall_service.get_about().map(ToString::to_string),
+            Some("Disable and uninstall the systemd user service".to_string())
+        );
+    }
+}
